@@ -59,6 +59,28 @@ subscription_id = "sample_sub_id"
     client_id = "sample_client_id"
 ```
 
+### Shared resource group
+
+By default every runner gets its own resource group (with its own virtual network, unless `disable_isolated_networks` is set), so the provider needs permission to create resource groups in the subscription.
+
+Set `resource_group` to create all runners in one existing resource group instead:
+
+```toml
+location = "westeurope"
+resource_group = "ci-vms-rg"
+disable_isolated_networks = true
+vnet_subnet_id = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>"
+```
+
+In this mode:
+
+* each runner is a VM, its OS disk and its NIC, all named after the runner, in `resource_group`; the OS disk and the NIC are deleted together with the VM;
+* runners must use an existing subnet (`vnet_subnet_id` with `disable_isolated_networks = true`, in the config or in the pool extra specs);
+* no per-runner network security group is created: traffic is governed by the NSG of the subnet, so `open_inbound_ports` and `allocate_public_ip` are rejected;
+* instances are listed only in `resource_group`, not across the subscription.
+
+The provider identity then only needs the built-in `Virtual Machine Contributor` role on `resource_group` and on the subnet (for `subnets/join/action`); with `use_ephemeral_storage` it also needs `Microsoft.Compute/skus/read` on the subscription.
+
 ## Creating a pool
 
 After you [add it to garm as an external provider](https://github.com/cloudbase/garm/blob/main/doc/config.md#provider-configuration), you need to create a pool that uses it. Assuming you named your external provider as ```azure``` in the garm config, the following command should create a new pool:

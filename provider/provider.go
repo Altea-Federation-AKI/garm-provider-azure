@@ -90,22 +90,26 @@ func (a *azureProvider) CreateInstance(ctx context.Context, bootstrapParams para
 		}
 	}
 
-	_, err = a.azCli.CreateResourceGroup(ctx, runnerSpec.BootstrapParams.Name, runnerSpec.Tags)
-	if err != nil {
-		return params.ProviderInstance{}, fmt.Errorf("failed to create resource group: %w", err)
+	sharedRG := a.azCli.SharedResourceGroup() != ""
+	if !sharedRG {
+		_, err = a.azCli.CreateResourceGroup(ctx, runnerSpec.BootstrapParams.Name, runnerSpec.Tags)
+		if err != nil {
+			return params.ProviderInstance{}, fmt.Errorf("failed to create resource group: %w", err)
+		}
 	}
 
 	defer func() {
 		if err != nil {
-			a.azCli.DeleteResourceGroup(ctx, runnerSpec.BootstrapParams.Name, true) //nolint
+			a.DeleteInstance(ctx, runnerSpec.BootstrapParams.Name) //nolint
 		}
 	}()
 
 	var pubIPID string
 	var pubIP string
 	if runnerSpec.AllocatePublicIP {
-		publicIP, err := a.azCli.CreatePublicIP(ctx, runnerSpec.BootstrapParams.Name)
-		if err != nil {
+		publicIP, pipErr := a.azCli.CreatePublicIP(ctx, runnerSpec.BootstrapParams.Name)
+		if pipErr != nil {
+			err = pipErr // seen by the deferred cleanup
 			return params.ProviderInstance{}, fmt.Errorf("failed to create public IP: %w", err)
 		}
 		if publicIP.Properties != nil && publicIP.Properties.IPAddress != nil {
@@ -114,9 +118,13 @@ func (a *azureProvider) CreateInstance(ctx context.Context, bootstrapParams para
 		pubIPID = *publicIP.ID
 	}
 
-	nsg, err := a.azCli.CreateNetworkSecurityGroup(ctx, runnerSpec.BootstrapParams.Name, runnerSpec)
-	if err != nil {
-		return params.ProviderInstance{}, fmt.Errorf("failed to create network security group: %w", err)
+	// With a shared resource group the subnet NSG governs traffic: no per-runner NSG.
+	var nsgID string
+	if !sharedRG {
+		nsgID, err = a.createNetworkSecurityGroup(ctx, runnerSpec)
+		if err != nil {
+			return params.ProviderInstance{}, fmt.Errorf("failed to create network security group: %w", err)
+		}
 	}
 
 	subnetID, err := a.resolveSubnetID(ctx, runnerSpec)
@@ -124,12 +132,12 @@ func (a *azureProvider) CreateInstance(ctx context.Context, bootstrapParams para
 		return params.ProviderInstance{}, fmt.Errorf("failed to resolve subnet ID: %w", err)
 	}
 
-	nic, err := a.azCli.CreateNetWorkInterface(ctx, runnerSpec.BootstrapParams.Name, subnetID, *nsg.ID, pubIPID, runnerSpec.UseAcceleratedNetworking)
+	nic, err := a.azCli.CreateNetWorkInterface(ctx, runnerSpec.BootstrapParams.Name, subnetID, nsgID, pubIPID, runnerSpec.UseAcceleratedNetworking)
 	if err != nil {
 		return params.ProviderInstance{}, fmt.Errorf("failed to create NIC: %w", err)
 	}
 
-	if err := a.azCli.CreateVirtualMachine(ctx, runnerSpec, *nic.ID, sizeSpec); err != nil {
+	if err = a.azCli.CreateVirtualMachine(ctx, runnerSpec, *nic.ID, sizeSpec); err != nil {
 		return params.ProviderInstance{}, fmt.Errorf("failed to create VM: %w", err)
 	}
 
@@ -155,6 +163,14 @@ func (a *azureProvider) CreateInstance(ctx context.Context, bootstrapParams para
 	return instance, nil
 }
 
+func (a *azureProvider) createNetworkSecurityGroup(ctx context.Context, runnerSpec *spec.RunnerSpec) (string, error) {
+	nsg, err := a.azCli.CreateNetworkSecurityGroup(ctx, runnerSpec.BootstrapParams.Name, runnerSpec)
+	if err != nil {
+		return "", err
+	}
+	return *nsg.ID, nil
+}
+
 func (a *azureProvider) resolveSubnetID(ctx context.Context, runnerSpec *spec.RunnerSpec) (string, error) {
 	if runnerSpec.VnetSubnetID != "" && runnerSpec.DisableIsolatedNetworks {
 		return runnerSpec.VnetSubnetID, nil
@@ -175,6 +191,12 @@ func (a *azureProvider) resolveSubnetID(ctx context.Context, runnerSpec *spec.Ru
 
 // Delete instance will delete the instance in a provider.
 func (a *azureProvider) DeleteInstance(ctx context.Context, instance string) error {
+	if a.azCli.SharedResourceGroup() != "" {
+		if err := a.azCli.DeleteInstanceResources(ctx, instance); err != nil {
+			return fmt.Errorf("failed to delete instance: %w", err)
+		}
+		return nil
+	}
 	err := a.azCli.DeleteResourceGroup(ctx, instance, true)
 	if err != nil {
 		return fmt.Errorf("failed to delete instance: %w", err)

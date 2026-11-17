@@ -51,6 +51,15 @@ type Config struct {
 	UseAcceleratedNetworking bool   `toml:"use_accelerated_networking"`
 	VnetSubnetID             string `toml:"vnet_subnet_id"`
 	DisableIsolatedNetworks  bool   `toml:"disable_isolated_networks"`
+	// ResourceGroup is an existing resource group in which all runner resources
+	// (VM, OS disk, NIC and, if requested, public IP) are created. When empty
+	// (the default) every runner gets its own resource group, which requires
+	// permissions to create resource groups in the subscription. When set, the
+	// provider only needs rights on this resource group and on the subnet:
+	// runners must use an existing subnet (vnet_subnet_id with
+	// disable_isolated_networks = true) and no per-runner network security
+	// group is created, so traffic is governed by the NSG of the subnet.
+	ResourceGroup string `toml:"resource_group"`
 }
 
 func (c *Config) Validate() error {
@@ -71,6 +80,10 @@ func (c *Config) Validate() error {
 		if err := ValidateVnetSubnet(c.VnetSubnetID); err != nil {
 			return fmt.Errorf("invalid vnet_subnet_id: %w", err)
 		}
+	}
+
+	if c.ResourceGroup != "" && !c.DisableIsolatedNetworks {
+		return fmt.Errorf("resource_group requires disable_isolated_networks = true and an existing vnet_subnet_id")
 	}
 
 	return nil

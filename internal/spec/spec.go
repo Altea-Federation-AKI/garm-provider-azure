@@ -224,6 +224,7 @@ func GetRunnerSpecFromBootstrapParams(data params.BootstrapInstance, controllerI
 		VnetSubnetID:             cfg.VnetSubnetID,
 		DisableIsolatedNetworks:  cfg.DisableIsolatedNetworks,
 		ExtraPackages:            extraSpecs.ExtraPackages,
+		ResourceGroup:            cfg.ResourceGroup,
 	}
 
 	if extraSpecs.UseEphemeralStorage != nil {
@@ -282,6 +283,9 @@ type RunnerSpec struct {
 	DisableUpdates           bool
 	ExtraPackages            []string
 	EnableBootDebug          bool
+	// ResourceGroup is the shared resource group of all runners (config
+	// resource_group); empty means one resource group per runner.
+	ResourceGroup string
 }
 
 func (r RunnerSpec) Validate() error {
@@ -310,6 +314,18 @@ func (r RunnerSpec) Validate() error {
 
 	if err := config.ValidateVnetSubnet(r.VnetSubnetID); err != nil {
 		return fmt.Errorf("invalid vnet subnet id: %w", err)
+	}
+
+	if r.ResourceGroup != "" {
+		if !r.DisableIsolatedNetworks || r.VnetSubnetID == "" {
+			return fmt.Errorf("a shared resource group requires an existing subnet (vnet_subnet_id and disable_isolated_networks)")
+		}
+		if r.AllocatePublicIP {
+			return fmt.Errorf("allocate_public_ip is not supported with a shared resource group")
+		}
+		if len(r.OpenInboundPorts) > 0 {
+			return fmt.Errorf("open_inbound_ports is not supported with a shared resource group: use the NSG of the subnet")
+		}
 	}
 
 	if len(r.SSHPublicKeys) > 0 {
@@ -560,6 +576,15 @@ func (r RunnerSpec) GetNewVMProperties(networkInterfaceID string, sizeSpec VMSiz
 			},
 		},
 		SecurityProfile: securityProfile,
+	}
+
+	if r.ResourceGroup != "" {
+		// Shared resource group: the OS disk and the NIC go away with the VM,
+		// since there is no per-runner resource group to delete.
+		properties.StorageProfile.OSDisk.DeleteOption = to.Ptr(armcompute.DiskDeleteOptionTypesDelete)
+		properties.NetworkProfile.NetworkInterfaces[0].Properties = &armcompute.NetworkInterfaceReferenceProperties{
+			DeleteOption: to.Ptr(armcompute.DeleteOptionsDelete),
+		}
 	}
 
 	if r.BootstrapParams.OSType == params.Linux {
